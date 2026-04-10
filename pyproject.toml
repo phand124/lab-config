@@ -1,0 +1,14 @@
+[project]
+name = "lab-config"
+version = "0.1.0"
+description = "Connect and configure ContainerLab topologies."
+readme = "README.md"
+authors = [
+    { name = "Phillip H", email = "phillip.handberry@proton.me" }
+]
+requires-python = ">=3.13"
+dependencies = []
+
+[build-system]
+requires = ["uv_build>=0.10.6,<0.11.0"]
+build-backend = "uv_build"
