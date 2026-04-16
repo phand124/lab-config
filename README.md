@@ -21,3 +21,13 @@ Initial thoughts of breakdown, into classes and their methods/roles:
     
 
 The Idea is to build out say run vlans(sw01) and have it build the listed vlans in the clab topology. 
+
+---- 
+
+Added Netbox to the mix, restructured accordingly. 
+Push topology to Netbox nested as its own Tenant, with Sites and Devices mapped accordingly. 
+From there go forth and use Netbox as source of truth for other lab generation. 
+Mostly scrapping the earlier work for building out this aspect. 
+
+Uses  `pynetbox` for API connection. 
+
