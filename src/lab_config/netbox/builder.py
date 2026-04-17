@@ -1,22 +1,31 @@
 """
-lab_tools/netbox/builder.py
----------------------------
+lab_config/netbox/builder.py
+----------------------------
 Pushes a LabTopology into NetBox using pynetbox.
+
+Site slug namespacing
+---------------------
+NetBox sites share a global slug space regardless of tenant.
+To keep lab versions isolated, site slugs are prefixed with the lab name:
+
+    LabSite("dc-a")  in  LabTopology("cisco-ospf-v1")
+    → slug: cisco-ospf-v1-dc-a
+    → name: dc-a   (display name stays short)
 
 Creation order
 --------------
-1.  Tenant Group  "Labs"        shared, once
-2.  Site Group    "Lab Sites"   shared, once
-3.  Manufacturer               shared, once per manufacturer
-4.  Device Type                shared, once per platform model
-5.  Device Role                shared, once per role
-6.  Platform                   shared, once per platform
-7.  Tenant                     per lab
-8.  Site                       per lab
-9.  IPAM Prefix                per lab  (if mgmt_prefix set)
-10. Devices
+1.  Tenant Group  "Labs"         shared, once
+2.  Site Group    "Lab Sites"    shared, once
+3.  Manufacturer                 shared, once per manufacturer
+4.  Device Type                  shared, once per platform model
+5.  Device Role                  shared, once per role
+6.  Platform                     shared, once per platform
+7.  Tenant                       per lab
+8.  Sites                        per lab, one per LabSite
+9.  IPAM Prefix                  per lab (single mgmt prefix, tenant-scoped)
+10. Devices                      per device, assigned to their site
 11. Interfaces + IP Addresses
-12. Primary IP set on device   (from mgmt_ip)
+12. Primary IP on device
 13. Cables
 
 All steps are idempotent — safe to re-run.
@@ -30,29 +39,44 @@ from typing import Dict, List, Optional
 
 import pynetbox
 
-from ..topology import Device, DevicePlatform, DeviceRole, Interface, InterfaceType, LabTopology, Link
+from ..topology import (
+    Device,
+    DevicePlatform,
+    DeviceRole,
+    Interface,
+    InterfaceType,
+    LabSite,
+    LabTopology,
+    Link,
+)
 
 log = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------
-# Reference data: platform → (manufacturer, device-type model, napalm driver)
+# Platform reference data
 # ---------------------------------------------------------------------------
 
 PLATFORM_META: Dict[DevicePlatform, Dict] = {
+    # Arista
     DevicePlatform.CEOS:           {"manufacturer": "Arista Networks",  "model": "cEOS",           "napalm": "eos"},
     DevicePlatform.VEOS:           {"manufacturer": "Arista Networks",  "model": "vEOS",           "napalm": "eos"},
-    DevicePlatform.IOL:            {"manufacturer": "Cisco", "model": "IOL",    "napalm": "ios"},
-    DevicePlatform.IOLL2:          {"manufacturer": "Cisco", "model": "IOL L2", "napalm": None},
+    # Cisco IOS / IOS-XE
     DevicePlatform.IOSV:           {"manufacturer": "Cisco",            "model": "IOSv",            "napalm": "ios"},
+    DevicePlatform.IOL:            {"manufacturer": "Cisco",            "model": "IOL",             "napalm": "ios"},
+    DevicePlatform.IOLL2:          {"manufacturer": "Cisco",            "model": "IOL L2",          "napalm": None},
     DevicePlatform.CSR1000V:       {"manufacturer": "Cisco",            "model": "CSR1000v",        "napalm": "ios"},
     DevicePlatform.CAT8000V:       {"manufacturer": "Cisco",            "model": "Catalyst8000v",   "napalm": "ios"},
+    # Cisco IOS-XR
     DevicePlatform.XRVM:           {"manufacturer": "Cisco",            "model": "XRv",             "napalm": "iosxr"},
     DevicePlatform.XRD:            {"manufacturer": "Cisco",            "model": "XRd",             "napalm": "iosxr"},
+    # Cisco NX-OS
     DevicePlatform.NXOSV:          {"manufacturer": "Cisco",            "model": "NX-OSv",          "napalm": "nxos"},
+    # Juniper
     DevicePlatform.VJUNOSEVOLVED:  {"manufacturer": "Juniper Networks", "model": "vJunos-evolved",  "napalm": "junos"},
     DevicePlatform.VQFX:           {"manufacturer": "Juniper Networks", "model": "vQFX",            "napalm": "junos"},
     DevicePlatform.VMXVCP:         {"manufacturer": "Juniper Networks", "model": "vMX-VCP",         "napalm": "junos"},
+    # Open-source / Linux
     DevicePlatform.LINUX:          {"manufacturer": "Generic",          "model": "Linux VM",        "napalm": None},
     DevicePlatform.VYOS:           {"manufacturer": "VyOS",             "model": "VyOS",            "napalm": None},
     DevicePlatform.FRR:            {"manufacturer": "FRRouting",        "model": "FRR",             "napalm": None},
@@ -72,16 +96,19 @@ def _slug(text: str) -> str:
     return re.sub(r"[^a-z0-9-]+", "-", text.lower()).strip("-")
 
 
-def _get_or_create(endpoint, created_msg: str, **kwargs):
-    """
-    Fetch a single object by kwargs. Create it if it doesn't exist.
-    Returns (object, created: bool).
-    """
-    obj = endpoint.get(**kwargs)
+def _site_slug(lab_name: str, site_name: str) -> str:
+    """Namespaced site slug: ``{lab-name}-{site-name}``."""
+    return f"{_slug(lab_name)}-{_slug(site_name)}"
+
+
+def _get_or_create(endpoint, msg: str, **kwargs):
+    """Fetch by slug, create if missing. Returns (obj, created)."""
+    slug = kwargs.get("slug")
+    obj = endpoint.get(slug=slug) if slug else endpoint.get(**kwargs)
     if obj:
         return obj, False
     obj = endpoint.create(**kwargs)
-    log.info(created_msg)
+    log.info(msg)
     return obj, True
 
 
@@ -91,20 +118,12 @@ def _get_or_create(endpoint, created_msg: str, **kwargs):
 
 class NetBoxLabBuilder:
     """
-    Push a :class:`~lab_tools.topology.LabTopology` into NetBox.
+    Push a LabTopology into NetBox.
 
     Args:
         nb:                Connected ``pynetbox.api`` instance.
         tenant_group_name: Defaults to ``"Labs"``.
         site_group_name:   Defaults to ``"Lab Sites"``.
-
-    Example::
-
-        from lab_tools.netbox import connect, NetBoxLabBuilder
-
-        nb      = connect("http://netbox.lab:8000", token="abc123", verify_ssl=False)
-        builder = NetBoxLabBuilder(nb)
-        builder.build(my_lab)
     """
 
     def __init__(
@@ -115,15 +134,14 @@ class NetBoxLabBuilder:
     ) -> None:
         self.nb = nb
         self.tenant_group_name = tenant_group_name
-        self.site_group_name = site_group_name
+        self.site_group_name   = site_group_name
 
-        # Caches — populated progressively, shared across multiple build() calls
         self._tenant_group_id: Optional[int] = None
         self._site_group_id: Optional[int] = None
-        self._manufacturer_ids: Dict[str, int] = {}   # keyed by slug
-        self._device_type_ids: Dict[str, int] = {}    # keyed by slug
-        self._device_role_ids: Dict[str, int] = {}    # keyed by slug
-        self._platform_ids: Dict[str, int] = {}       # keyed by platform.value
+        self._manufacturer_ids: Dict[str, int] = {}
+        self._device_type_ids: Dict[str, int] = {}
+        self._device_role_ids: Dict[str, int] = {}
+        self._platform_ids: Dict[str, int] = {}
 
     # ------------------------------------------------------------------
     # Public
@@ -131,8 +149,8 @@ class NetBoxLabBuilder:
 
     def build(self, lab: LabTopology) -> None:
         """
-        Push *lab* into NetBox end-to-end. Validates topology first.
-        Safe to call multiple times — all operations are idempotent.
+        Push *lab* into NetBox end-to-end. Validates first.
+        All operations are idempotent — safe to re-run.
         """
         errors = lab.validate()
         if errors:
@@ -142,14 +160,22 @@ class NetBoxLabBuilder:
             )
 
         log.info("=== Building lab '%s' ===", lab.name)
+
         self._ensure_shared_reference_data(lab)
         tenant_id = self._ensure_tenant(lab)
-        site_id   = self._ensure_site(lab, tenant_id)
+
+        # Build all sites first, collect site_name → site_id map
+        site_ids: Dict[str, int] = {}
+        for lab_site in lab.sites:
+            site_id = self._ensure_site(lab, lab_site, tenant_id)
+            lab_site._netbox_id = site_id
+            site_ids[lab_site.name] = site_id
 
         if lab.mgmt_prefix:
-            self._ensure_prefix(lab.mgmt_prefix, site_id, tenant_id)
+            self._ensure_prefix(lab.mgmt_prefix, tenant_id)
 
         for device in lab.devices:
+            site_id = site_ids[device.site]
             device._netbox_id = self._ensure_device(device, site_id, tenant_id)
             self._ensure_interfaces(device, tenant_id)
 
@@ -162,14 +188,14 @@ class NetBoxLabBuilder:
         """
         Delete all NetBox objects belonging to *lab*.
 
-        Shared reference data (manufacturers, device types, roles, platforms)
-        is intentionally preserved — other labs may use them.
+        Deletes cables → devices → sites → tenant.
+        Shared reference data is left intact.
 
         Args:
-            dry_run: Return what would be deleted without deleting it.
+            dry_run: Preview what would be deleted without doing it.
 
         Returns:
-            List of action strings describing what was (or would be) deleted.
+            List of action strings.
         """
         actions: List[str] = []
         tenant = self.nb.tenancy.tenants.get(slug=_slug(lab.name))
@@ -198,9 +224,9 @@ class NetBoxLabBuilder:
                 log.info(msg)
                 dev.delete()
 
-        site = self.nb.dcim.sites.get(slug=_slug(lab.site_name or lab.name))
-        if site:
-            msg = f"Delete site '{site.name}'"
+        sites_nb = list(self.nb.dcim.sites.filter(tenant_id=tenant.id))
+        for site in sites_nb:
+            msg = f"Delete site '{site.name}' (slug={site.slug})"
             actions.append(msg)
             if not dry_run:
                 log.info(msg)
@@ -321,22 +347,20 @@ class NetBoxLabBuilder:
             name=lab.name,
             group=self._tenant_group_id,
             description=lab.description,
-            tags=[{"name": t} for t in lab.tags],
         )
         return obj.id
 
-    def _ensure_site(self, lab: LabTopology, tenant_id: int) -> int:
-        site_name = lab.site_name or lab.name
-        slug      = _slug(site_name)
+    def _ensure_site(self, lab: LabTopology, lab_site: LabSite, tenant_id: int) -> int:
+        slug = _site_slug(lab.name, lab_site.name)
         obj, _ = _get_or_create(
             self.nb.dcim.sites,
-            f"Created site '{site_name}'",
+            f"Created site '{lab_site.name}' (slug={slug})",
             slug=slug,
-            name=site_name,
+            name=lab_site.name,
             status="active",
             group=self._site_group_id,
             tenant=tenant_id,
-            description=lab.description,
+            description=lab_site.description,
         )
         return obj.id
 
@@ -344,12 +368,11 @@ class NetBoxLabBuilder:
     # IPAM
     # ------------------------------------------------------------------
 
-    def _ensure_prefix(self, prefix: str, site_id: int, tenant_id: int) -> int:
+    def _ensure_prefix(self, prefix: str, tenant_id: int) -> int:
         obj = self.nb.ipam.prefixes.get(prefix=prefix)
         if not obj:
             obj = self.nb.ipam.prefixes.create(
                 prefix=prefix,
-                site=site_id,
                 tenant=tenant_id,
                 description="Lab management network",
                 is_pool=True,
@@ -361,13 +384,11 @@ class NetBoxLabBuilder:
     def _ensure_ip(self, address: str, interface_id: int, tenant_id: int) -> int:
         obj = self.nb.ipam.ip_addresses.get(address=address)
         if obj:
-            # Re-assign to this interface if needed
             if obj.assigned_object_id != interface_id:
                 obj.assigned_object_type = "dcim.interface"
                 obj.assigned_object_id   = interface_id
                 obj.save()
             return obj.id
-
         obj = self.nb.ipam.ip_addresses.create(
             address=address,
             assigned_object_type="dcim.interface",
@@ -394,8 +415,6 @@ class NetBoxLabBuilder:
                 platform=self._platform_ids[device.platform.value],
                 status="planned",
                 comments=device.image or "",
-                tags=[{"name": t} for t in device.tags],
-                custom_fields=device.custom_fields,
             )
             log.info("Created device '%s'", device.name)
         return obj.id
@@ -403,7 +422,6 @@ class NetBoxLabBuilder:
     def _ensure_interfaces(self, device: Device, tenant_id: int) -> None:
         assert device._netbox_id, f"Device '{device.name}' has no NetBox ID."
 
-        # Build full interface list including auto mgmt interface
         all_ifaces = list(device.interfaces)
         if device.mgmt_ip and not any(i.name == "Management0" for i in all_ifaces):
             all_ifaces.append(Interface(
@@ -424,7 +442,6 @@ class NetBoxLabBuilder:
                     type=iface.iface_type.value,
                     enabled=iface.enabled,
                     description=iface.description or "",
-                    tags=[{"name": t} for t in iface.tags],
                 )
                 log.info("Created interface %s / %s", device.name, iface.name)
 
@@ -436,7 +453,6 @@ class NetBoxLabBuilder:
                 if iface.name == "Management0":
                     primary_ip_id = ip_id
 
-        # Set primary IP on the device
         if primary_ip_id:
             dev_obj = self.nb.dcim.devices.get(device._netbox_id)
             dev_obj.primary_ip4 = primary_ip_id
@@ -460,7 +476,6 @@ class NetBoxLabBuilder:
             )
             return
 
-        # Check if a cable already exists on the A-side endpoint
         iface_obj = self.nb.dcim.interfaces.get(iface_a._netbox_id)
         if iface_obj and iface_obj.cable:
             link._netbox_id = iface_obj.cable.id

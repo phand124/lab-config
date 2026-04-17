@@ -1,5 +1,5 @@
 """
-lab_tools/netbox/reader.py
+lab_config/netbox/reader.py
 --------------------------
 Reconstructs a LabTopology from NetBox.
 
@@ -48,14 +48,14 @@ _MGMT_IFACE_NAMES = {"Management0", "Management1", "mgmt0", "mgmt", "Mgmt0"}
 
 class NetBoxLabReader:
     """
-    Read a lab back out of NetBox as a :class:`~lab_tools.topology.LabTopology`.
+    Read a lab back out of NetBox as a :class:`~lab_config.topology.LabTopology`.
 
     Args:
         nb: Connected ``pynetbox.api`` instance.
 
     Example::
 
-        from lab_tools.netbox import connect, NetBoxLabReader
+        from lab_config.netbox import connect, NetBoxLabReader
 
         nb     = connect("http://netbox.lab:8000", token="abc123", verify_ssl=False)
         reader = NetBoxLabReader(nb)
@@ -73,7 +73,7 @@ class NetBoxLabReader:
 
     def get_lab(self, name: str) -> LabTopology:
         """
-        Reconstruct a :class:`~lab_tools.topology.LabTopology` by lab name.
+        Reconstruct a :class:`~lab_config.topology.LabTopology` by lab name.
 
         Args:
             name: Lab name (matches the NetBox tenant name/slug).
@@ -171,7 +171,7 @@ class NetBoxLabReader:
         tenant_id: int,
     ) -> Tuple[Device, Dict[int, Tuple[str, str]]]:
         """
-        Reconstruct a :class:`~lab_tools.topology.Device` from a NetBox device record.
+        Reconstruct a :class:`~lab_config.topology.Device` from a NetBox device record.
 
         Returns the Device and a mapping of ``{interface_id: (device_name, iface_name)}``
         for cable reconstruction.
@@ -252,7 +252,7 @@ class NetBoxLabReader:
         iface_map: Dict[int, Tuple[str, str]],
     ) -> List[Link]:
         """
-        Reconstruct :class:`~lab_tools.topology.Link` objects from NetBox cables.
+        Reconstruct :class:`~lab_config.topology.Link` objects from NetBox cables.
 
         Iterates cables per device and deduplicates by cable ID.
         Only cables where both endpoints are in this lab's iface_map are included.
@@ -279,7 +279,7 @@ class NetBoxLabReader:
         iface_map: Dict[int, Tuple[str, str]],
     ) -> Optional[Link]:
         """
-        Convert a single NetBox cable object to a :class:`~lab_tools.topology.Link`.
+        Convert a single NetBox cable object to a :class:`~lab_config.topology.Link`.
 
         Returns ``None`` if either endpoint isn't in this lab (cross-lab cable)
         or if the terminations aren't interface type.

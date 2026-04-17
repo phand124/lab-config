@@ -14,8 +14,8 @@ import argparse
 import logging
 import sys
 
-from lab_tools.loader import load_yaml
-from lab_tools.netbox import connect, NetBoxLabBuilder, NetBoxLabReader
+from lab_config.loader import load_yaml
+from lab_config.netbox import connect, NetBoxLabBuilder, NetBoxLabReader
 
 logging.basicConfig(
     level=logging.INFO,

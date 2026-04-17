@@ -1,7 +1,7 @@
 """
-lab_tools/netbox
+lab_config/netbox
 ----------------
-NetBox integration for lab_tools.
+NetBox integration for lab_config.
 
 Exports
 -------
@@ -11,7 +11,7 @@ NetBoxLabReader     Pull a LabTopology back out of NetBox.
 
 Example::
 
-    from lab_tools.netbox import connect, NetBoxLabBuilder, NetBoxLabReader
+    from lab_config.netbox import connect, NetBoxLabBuilder, NetBoxLabReader
 
     nb      = connect("http://netbox.lab:8000", token="abc123", verify_ssl=False)
     builder = NetBoxLabBuilder(nb)
